@@ -140,6 +140,9 @@ spec:
         - --cluster-users-enabled
         - --cluster-users-config-path=/var/lib/cilium/etcd-config/users.yaml
         {{- end }}
+        {{- with .Values.clustermesh.apiserver.extraArgs }}
+        {{- toYaml . | trim | nindent 8 }}
+        {{- end }}
         env:
         - name: CLUSTER_NAME
           valueFrom:
