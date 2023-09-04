@@ -30,6 +30,7 @@ import (
 	"github.com/eapache/channels"
 	"github.com/osrg/gobgp/v3/internal/pkg/config"
 	"github.com/osrg/gobgp/v3/internal/pkg/table"
+	"github.com/osrg/gobgp/v3/internal/pkg/version"
 	"github.com/osrg/gobgp/v3/pkg/log"
 	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v3/pkg/packet/bmp"
@@ -493,7 +494,7 @@ func (h *fsmHandler) connectLoop(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	fsm := h.fsm
 
-	retry, addr, port, password, ttl, ttlMin, localAddress, localPort, bindInterface := func() (int, string, int, string, uint8, uint8, string, int, string) {
+	retry, addr, port, password, ttl, ttlMin, mss, localAddress, localPort, bindInterface := func() (int, string, int, string, uint8, uint8, uint16, string, int, string) {
 		fsm.lock.RLock()
 		defer fsm.lock.RUnlock()
 
@@ -520,7 +521,7 @@ func (h *fsmHandler) connectLoop(ctx context.Context, wg *sync.WaitGroup) {
 				ttl = fsm.pConf.EbgpMultihop.Config.MultihopTtl
 			}
 		}
-		return tick, addr, port, password, ttl, ttlMin, fsm.pConf.Transport.Config.LocalAddress, int(fsm.pConf.Transport.Config.LocalPort), fsm.pConf.Transport.Config.BindInterface
+		return tick, addr, port, password, ttl, ttlMin, fsm.pConf.Transport.Config.TcpMss, fsm.pConf.Transport.Config.LocalAddress, int(fsm.pConf.Transport.Config.LocalPort), fsm.pConf.Transport.Config.BindInterface
 	}()
 
 	tick := minConnectRetryInterval
@@ -555,7 +556,7 @@ func (h *fsmHandler) connectLoop(ctx context.Context, wg *sync.WaitGroup) {
 				LocalAddr: laddr,
 				Timeout:   time.Duration(tick-1) * time.Second,
 				Control: func(network, address string, c syscall.RawConn) error {
-					return dialerControl(fsm.logger, network, address, c, ttl, ttlMin, password, bindInterface)
+					return dialerControl(fsm.logger, network, address, c, ttl, ttlMin, mss, password, bindInterface)
 				},
 			}
 
@@ -623,45 +624,23 @@ func (h *fsmHandler) active(ctx context.Context) (bgp.FSMState, *fsmStateReason)
 			fsm.lock.Lock()
 			fsm.conn = conn
 			fsm.lock.Unlock()
-			ttl := 0
-			ttlMin := 0
 
 			fsm.lock.RLock()
-			if fsm.pConf.TtlSecurity.Config.Enabled {
-				ttl = 255
-				ttlMin = int(fsm.pConf.TtlSecurity.Config.TtlMin)
-			} else if fsm.pConf.Config.PeerAs != 0 && fsm.pConf.Config.PeerType == config.PEER_TYPE_EXTERNAL {
-				if fsm.pConf.EbgpMultihop.Config.Enabled {
-					ttl = int(fsm.pConf.EbgpMultihop.Config.MultihopTtl)
-				} else if fsm.pConf.Transport.Config.Ttl != 0 {
-					ttl = int(fsm.pConf.Transport.Config.Ttl)
-				} else {
-					ttl = 1
-				}
-			} else if fsm.pConf.Transport.Config.Ttl != 0 {
-				ttl = int(fsm.pConf.Transport.Config.Ttl)
+			if err := setPeerConnTTL(fsm); err != nil {
+				fsm.logger.Warn("cannot set TTL for peer",
+					log.Fields{
+						"Topic": "Peer",
+						"Key":   fsm.pConf.Config.NeighborAddress,
+						"State": fsm.state.String(),
+						"Error": err})
 			}
-			if ttl != 0 {
-				if err := setTCPTTLSockopt(conn.(*net.TCPConn), ttl); err != nil {
-					fsm.logger.Warn("cannot set TTL for peer",
-						log.Fields{
-							"Topic": "Peer",
-							"Key":   fsm.pConf.Config.NeighborAddress,
-							"State": fsm.state.String(),
-							"Ttl":   ttl,
-							"Error": err})
-				}
-			}
-			if ttlMin != 0 {
-				if err := setTCPMinTTLSockopt(conn.(*net.TCPConn), ttlMin); err != nil {
-					fsm.logger.Warn("cannot set minimal TTL for peer",
-						log.Fields{
-							"Topic": "Peer",
-							"Key":   fsm.pConf.Config.NeighborAddress,
-							"State": fsm.state.String(),
-							"Ttl":   ttl,
-							"Error": err})
-				}
+			if err := setPeerConnMSS(fsm); err != nil {
+				fsm.logger.Warn("cannot set MSS for peer",
+					log.Fields{
+						"Topic": "Peer",
+						"Key":   fsm.pConf.Config.NeighborAddress,
+						"State": fsm.state.String(),
+						"Error": err})
 			}
 			fsm.lock.RUnlock()
 			// we don't implement delayed open timer so move to opensent right
@@ -702,6 +681,49 @@ func (h *fsmHandler) active(ctx context.Context) (bgp.FSMState, *fsmStateReason)
 	}
 }
 
+func setPeerConnTTL(fsm *fsm) error {
+	ttl := 0
+	ttlMin := 0
+
+	if fsm.pConf.TtlSecurity.Config.Enabled {
+		ttl = 255
+		ttlMin = int(fsm.pConf.TtlSecurity.Config.TtlMin)
+	} else if fsm.pConf.Config.PeerAs != 0 && fsm.pConf.Config.PeerType == config.PEER_TYPE_EXTERNAL {
+		if fsm.pConf.EbgpMultihop.Config.Enabled {
+			ttl = int(fsm.pConf.EbgpMultihop.Config.MultihopTtl)
+		} else if fsm.pConf.Transport.Config.Ttl != 0 {
+			ttl = int(fsm.pConf.Transport.Config.Ttl)
+		} else {
+			ttl = 1
+		}
+	} else if fsm.pConf.Transport.Config.Ttl != 0 {
+		ttl = int(fsm.pConf.Transport.Config.Ttl)
+	}
+
+	if ttl != 0 {
+		if err := setTCPTTLSockopt(fsm.conn.(*net.TCPConn), ttl); err != nil {
+			return fmt.Errorf("failed to set TTL %d: %w", ttl, err)
+		}
+	}
+	if ttlMin != 0 {
+		if err := setTCPMinTTLSockopt(fsm.conn.(*net.TCPConn), ttlMin); err != nil {
+			return fmt.Errorf("failed to set minimal TTL %d: %w", ttlMin, err)
+		}
+	}
+	return nil
+}
+
+func setPeerConnMSS(fsm *fsm) error {
+	mss := fsm.pConf.Transport.Config.TcpMss
+	if mss == 0 {
+		return nil
+	}
+	if err := setTCPMSSSockopt(fsm.conn.(*net.TCPConn), mss); err != nil {
+		return fmt.Errorf("failed to set MSS %d: %w", mss, err)
+	}
+	return nil
+}
+
 func capAddPathFromConfig(pConf *config.Neighbor) bgp.ParameterCapabilityInterface {
 	tuples := make([]*bgp.CapAddPathTuple, 0, len(pConf.AfiSafis))
 	for _, af := range pConf.AfiSafis {
@@ -727,6 +749,11 @@ func capabilitiesFromConfig(pConf *config.Neighbor) []bgp.ParameterCapabilityInt
 	caps := make([]bgp.ParameterCapabilityInterface, 0, 4)
 	caps = append(caps, bgp.NewCapRouteRefresh())
 	caps = append(caps, bgp.NewCapFQDN(fqdn, ""))
+
+	if pConf.Config.SendSoftwareVersion || pConf.Config.PeerType == config.PEER_TYPE_INTERNAL {
+		softwareVersion := fmt.Sprintf("GoBGP/%s", version.Version())
+		caps = append(caps, bgp.NewCapSoftwareVersion(softwareVersion))
+	}
 
 	for _, af := range pConf.AfiSafis {
 		caps = append(caps, bgp.NewCapMultiProtocol(af.State.Family))
@@ -1075,7 +1102,11 @@ func (h *fsmHandler) recvMessageWithError() (*fsmMsg, error) {
 					}
 				}
 
-				table.UpdatePathAttrs4ByteAs(h.fsm.logger, body)
+				if err = table.UpdatePathAttrs4ByteAs(h.fsm.logger, body); err != nil {
+					fmsg.MsgData = err
+					return fmsg, err
+				}
+
 				if err = table.UpdatePathAggregator4ByteAs(body); err != nil {
 					fmsg.MsgData = err
 					return fmsg, err
