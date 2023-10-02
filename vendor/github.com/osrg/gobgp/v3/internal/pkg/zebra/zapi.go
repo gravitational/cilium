@@ -44,6 +44,7 @@ const (
 	headerMarker      uint8 = 255
 	frrHeaderMarker   uint8 = 254
 	interfaceNameSize       = 20
+	osIfNameSize            = 16
 	maxPathNum              = 64
 	maxMplsLabel            = 16
 )
@@ -59,6 +60,7 @@ const (
 )
 
 // Interface Link Layer Types.
+//
 //go:generate stringer -type=linkType
 type linkType uint32
 
@@ -175,6 +177,7 @@ func (t interfaceAddressFlag) String() string {
 }
 
 // Address Family IDentifier.
+//
 //go:generate stringer -type=afi
 type afi uint8
 
@@ -186,6 +189,7 @@ const (
 )
 
 // Safi is Subsequent Address Family IDentifier.
+//
 //go:generate stringer -type=Safi
 type Safi uint8
 
@@ -240,6 +244,7 @@ var safiRouteFamilyIPv6Map = map[Safi]bgp.RouteFamily{
 }
 
 // APIType is referred in zclient_test.
+//
 //go:generate stringer -type=APIType
 type APIType uint16
 
@@ -780,6 +785,7 @@ func (t APIType) addressFamily(version uint8) uint8 {
 }
 
 // RouteType is referred in zclient.
+//
 //go:generate stringer -type=RouteType
 type RouteType uint8
 
@@ -1178,6 +1184,7 @@ func (f Flag) String(version uint8, software Software) string {
 }
 
 // Nexthop Types.
+//
 //go:generate stringer -type=nexthopType
 type nexthopType uint8
 
@@ -1248,6 +1255,7 @@ func (t nexthopType) ifNameToIFIndex() nexthopType { // quagga
 }
 
 // Nexthop Flags.
+//
 //go:generate stringer -type=nexthopFlag
 type nexthopFlag uint8
 
@@ -1279,6 +1287,7 @@ const (
 )
 
 // Interface PTM Enable Configuration.
+//
 //go:generate stringer -type=ptmEnable
 type ptmEnable uint8
 
@@ -1289,6 +1298,7 @@ const (
 )
 
 // PTM Status.
+//
 //go:generate stringer -type=ptmStatus
 type ptmStatus uint8
 
@@ -1347,9 +1357,6 @@ type Client struct {
 // NewClient returns a Client instance (Client constructor)
 func NewClient(logger log.Logger, network, address string, typ RouteType, version uint8, software Software, mplsLabelRangeSize uint32) (*Client, error) {
 	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -1841,7 +1848,7 @@ type redistributeBody struct {
 	instance uint16
 }
 
-//  Ref: zebra_redistribute_add in zebra/redistribute.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
+// Ref: zebra_redistribute_add in zebra/redistribute.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
 func (b *redistributeBody) decodeFromBytes(data []byte, version uint8, software Software) error {
 	if version < 4 {
 		b.redist = RouteType(data[0])
@@ -1853,7 +1860,7 @@ func (b *redistributeBody) decodeFromBytes(data []byte, version uint8, software 
 	return nil
 }
 
-//  Ref: zebra_redistribute_send in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
+// Ref: zebra_redistribute_send in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
 func (b *redistributeBody) serialize(version uint8, software Software) ([]byte, error) {
 	if version < 4 {
 		return []byte{uint8(b.redist)}, nil
@@ -1909,14 +1916,29 @@ type interfaceUpdateBody struct {
 	linkParam    linkParam
 }
 
-//  Ref: zebra_interface_if_set_value in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
+// Ref: zebra_interface_if_set_value in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
 func (b *interfaceUpdateBody) decodeFromBytes(data []byte, version uint8, software Software) error {
-	if len(data) < interfaceNameSize+33 {
-		return fmt.Errorf("lack of bytes. need %d but %d", interfaceNameSize+29, len(data))
+	ifNameSize := interfaceNameSize
+	if version == 6 && software.name == "frr" && software.version >= 8.3 {
+		ifNameSize = osIfNameSize
+	}
+	// version 2: index(4)+status(1)+flags(8)+metric(4)+mtu(4)+mtu6(4)+bandwidth(4)+hw_addr_len(4)
+	necessaryDataSize := ifNameSize + 33
+	if version > 3 {
+		necessaryDataSize += 6 // add ptmEnable(1)+ptmStatus(1)+speed(4)
+	}
+	if version > 2 {
+		necessaryDataSize += 4 // add linktype(4)
+	}
+	if version == 6 && software.name == "frr" && software.version >= 7.2 {
+		necessaryDataSize += 4 // add linkIfIndex(4)
+	}
+	if len(data) < necessaryDataSize {
+		return fmt.Errorf("lack of bytes. need %d but %d", necessaryDataSize, len(data))
 	}
 
-	b.name = strings.Trim(string(data[:interfaceNameSize]), "\u0000")
-	data = data[interfaceNameSize:]
+	b.name = strings.Trim(string(data[:ifNameSize]), "\u0000")
+	data = data[ifNameSize:]
 	b.index = binary.BigEndian.Uint32(data[0:4])
 	b.status = interfaceStatus(data[4])
 	b.flags = binary.BigEndian.Uint64(data[5:13])
@@ -2002,7 +2024,7 @@ type interfaceAddressUpdateBody struct {
 	destination net.IP
 }
 
-//  Ref: zebra_interface_address_read in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
+// Ref: zebra_interface_address_read in lib/zclient.c of Quagga1.2&FRR3&FRR4&FRR5&FRR6&FRR7.x&FRR8 (ZAPI3&4&5&6)
 func (b *interfaceAddressUpdateBody) decodeFromBytes(data []byte, version uint8, software Software) error {
 	b.index = binary.BigEndian.Uint32(data[:4]) //STREAM_GETL(s, ifindex)
 	b.flags = interfaceAddressFlag(data[4])     //STREAM_GETC(s, ifc_flags)
@@ -2033,7 +2055,7 @@ type routerIDUpdateBody struct {
 	afi    afi
 }
 
-//  Ref: zebra_router_id_update_read in lib/zclient.c of Quagga1.2&FRR3&FRR5 (ZAPI3&4&5)
+// Ref: zebra_router_id_update_read in lib/zclient.c of Quagga1.2&FRR3&FRR5 (ZAPI3&4&5)
 func (b *routerIDUpdateBody) decodeFromBytes(data []byte, version uint8, software Software) error {
 	family := data[0]
 
