@@ -23,13 +23,13 @@ import (
 	"net"
 	"sort"
 
-	"github.com/osrg/gobgp/v3/internal/pkg/config"
+	"github.com/osrg/gobgp/v3/pkg/config/oc"
 	"github.com/osrg/gobgp/v3/pkg/log"
 	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
 )
 
-var SelectionOptions config.RouteSelectionOptionsConfig
-var UseMultiplePaths config.UseMultiplePathsConfig
+var SelectionOptions oc.RouteSelectionOptionsConfig
+var UseMultiplePaths oc.UseMultiplePathsConfig
 
 type BestPathReason uint8
 
@@ -118,7 +118,7 @@ func (i *PeerInfo) String() string {
 	return s.String()
 }
 
-func NewPeerInfo(g *config.Global, p *config.Neighbor) *PeerInfo {
+func NewPeerInfo(g *oc.Global, p *oc.Neighbor) *PeerInfo {
 	clusterID := net.ParseIP(string(p.RouteReflector.State.RouteReflectorClusterId)).To4()
 	// exclude zone info
 	naddr, _ := net.ResolveIPAddr("ip", p.State.NeighborAddress)
@@ -272,7 +272,6 @@ func (dest *Destination) Calculate(logger log.Logger, newPath *Path) *Update {
 // since not all paths get installed into the table due to bgp policy and
 // we can receive withdraws for such paths and withdrawals may not be
 // stopped by the same policies.
-//
 func (dest *Destination) explicitWithdraw(logger log.Logger, withdraw *Path) *Path {
 	logger.Debug("Removing withdrawals",
 		log.Fields{
